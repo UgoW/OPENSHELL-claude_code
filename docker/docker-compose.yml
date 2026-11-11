@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# OpenShell gateway with Podman compute driver for Claude Code
+#
+# This Compose file starts:
+#   - OpenShell Gateway (control plane)
+#   - Podman backend for sandbox containers
+#   - JWT generation service
+#
+# Prerequisites:
+#   - Podman installed and running (podman.socket or podman-machine on macOS)
+#   - Podman Compose provider (`podman compose version`)
+#   - OpenShell CLI installed (`openshell --version`)
+#
+# Quick start:
+#
+#   1. Build the Claude Code image:
+#        podman build -f docker/Dockerfile \
+#          -t openshell-claude-code:latest .
+#
+#   2. Start the gateway (generates JWT keys on first run):
+#        podman compose up -d
+#
+#   3. Register the gateway with the CLI (one-time):
+#        openshell gateway add http://localhost:8080 --name openshell-podman
+#
+#   4. Configure an AI provider (example: Anthropic):
+#        ANTHROPIC_API_KEY=sk-ant-... \
+#          openshell provider create --type anthropic --from-existing
+#
+#   5. Create a sandboxed Claude Code agent:
+#        openshell sandbox create --name claude-demo \
+#          --image openshell-claude-code:latest \
+#          --policy examples/claude-code/policy.yaml
+#
+#   6. Run Claude Code in the sandbox:
+#        openshell sandbox run claude-demo -- claude --help
+#
+# Stopping:
+#   podman compose down
+
+services:
+  # One-shot: generates sandbox JWT keys (kept if already present)
+  init:
+    image: ghcr.io/nvidia/openshell/gateway:${IMAGE_TAG:-latest}
+    user: "0"
+    restart: "no"
+    command: ["generate-certs", "--output-dir", "/var/lib/openshell/tls"]
+    environment:
+      HOME: /var/lib/openshell
+    volumes:
+      - &openshell-data
+        type: bind
+        source: /var/lib/openshell
+        target: /var/lib/openshell
+        bind:
+          create_host_path: true
+
+  # OpenShell Gateway with Podman compute driver
+  gateway:
+    image: ghcr.io/nvidia/openshell/gateway:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+    # Clear the default CMD so gateway.toml owns all settings
+    command: []
+
+    # Gateway needs access to Podman socket to create/manage containers
+    # Run as UID 0 to:
+    #   - Write the extracted supervisor binary to /var/lib/openshell
+    #   - Access the Podman socket (typically owned by the podman user or root)
+    user: "0"
+
+    ports:
+      # gRPC / control-plane API (supervisors reach this through the published port)
+      - "127.0.0.1:${OPENSHELL_PORT:-8080}:8080"
+      # Health endpoint (GET /healthz, GET /readyz)
+      - "127.0.0.1:${OPENSHELL_HEALTH_PORT:-8081}:8081"
+
+    volumes:
+      # Podman socket — lets the gateway create and manage sandbox containers
+      # On macOS with Podman Machine, use /run/user/1000/podman/podman.sock
+      # On Linux rootless, use /run/user/$(id -u)/podman/podman.sock
+      # On Linux rootful, use /run/podman/podman.sock
+      - /run/podman/podman.sock:/run/podman/podman.sock
+
+      # Data directory — must be a bind-mount (not a named volume) so that
+      # paths written inside the container are resolvable by Podman when it
+      # creates sandbox containers.
+      - *openshell-data
+
+      # Gateway configuration — all settings live here
+      - type: bind
+        source: ./gateway-claude-code.toml
+        target: /etc/openshell/gateway.toml
+        read_only: true
+
+    environment:
+      # Point the gateway at the TOML config file
+      OPENSHELL_GATEWAY_CONFIG: /etc/openshell/gateway.toml
+
+      # Database URL (SQLite for local development)
+      # For production, use a real database URL (PostgreSQL recommended)
+      OPENSHELL_DB_URL: "sqlite:/var/lib/openshell/gateway.db?mode=rwc"
+
+      # XDG paths ensure the extracted supervisor binary lands in the bind-mounted directory
+      XDG_DATA_HOME: /var/lib/openshell
+      HOME: /var/lib/openshell
+
+      # Optional: configure logging
+      RUST_LOG: openshell=info
+
+    # Health check: polls the gateway readiness endpoint
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+version: '3.8'

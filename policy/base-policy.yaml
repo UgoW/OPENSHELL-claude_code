@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# OpenShell security policy for Claude Code agent
+#
+# This policy enforces security boundaries for Claude Code running in a sandbox:
+# - Filesystem access: restrictive, read-only system paths
+# - Network: whitelisted AI provider endpoints
+# - Process: no extra capabilities, standard seccomp
+#
+# Usage:
+#   openshell sandbox create --name claude-demo \
+#     --image openshell-claude-code:latest \
+#     --policy examples/claude-code/policy.yaml
+#
+# To add network endpoints for your provider (e.g., OpenRouter, Anthropic),
+# add entries to network_policies.ai_providers.endpoints below.
+
+version: 1
+
+# Filesystem security: LUA + Landlock enforcement
+filesystem_policy:
+  # Include the managed /sandbox working directory
+  include_workdir: true
+  
+  # Read-only system paths (binaries, libraries, config)
+  read_only:
+    - /bin
+    - /usr
+    - /lib
+    - /lib64
+    - /proc
+    - /etc
+    - /dev/urandom
+    - /dev/null
+    - /dev/zero
+    - /var/log
+    - /opt
+  
+  # Read-write paths for workspace and temporary files
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+    - /dev/pts
+
+# Landlock: enforce best-effort compatibility (fall back gracefully if unavailable)
+landlock:
+  compatibility: best_effort
+
+# Network policies: restrict egress to approved endpoints
+network_policies:
+  # Anthropic Claude API endpoint
+  anthropic_api:
+    name: Anthropic API
+    endpoints:
+      - host: api.anthropic.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: /usr/bin/curl
+      - path: /usr/bin/wget
+      - path: /usr/bin/python3
+
+  # OpenRouter API (alternative provider)
+  openrouter_api:
+    name: OpenRouter API
+    endpoints:
+      - host: openrouter.ai
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: /usr/bin/curl
+      - path: /usr/bin/wget
+      - path: /usr/bin/python3
+
+  # PyPI for Python package installation
+  pypi:
+    name: PyPI Package Index
+    endpoints:
+      - host: pypi.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: files.pythonhosted.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - path: /usr/bin/python3
+      - path: /usr/bin/pip3
+
+  # GitHub API (for repository access, if needed)
+  github_api:
+    name: GitHub REST API
+    endpoints:
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - path: /usr/bin/curl
+      - path: /usr/bin/git
+
+  # NPM registry for JavaScript packages
+  npm_registry:
+    name: NPM Registry
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - path: /usr/bin/npm
+      - path: /usr/bin/node
+
+# Process identity: runs as claude (non-root)
+process_policy:
+  user: claude
+  group: claude
+
+# Notes for customization:
+# 1. Add more network_policies entries for additional API endpoints your agent needs
+# 2. Each endpoint requires:
+#    - host: fully qualified domain name (no wildcards in base policy)
+#    - port: 443 for HTTPS (standard)
+#    - protocol: "rest" for HTTP/REST
+#    - enforcement: "enforce" (hard deny) or "log" (allow + log)
+#    - access: "read-only" or "read-write" depending on HTTP verbs needed
+# 3. For enforcement="log", network calls are allowed but logged for monitoring
+# 4. Filesystem paths use LUA matching; /usr matches /usr and all subdirs
+# 5. Landlock compatibility: "best_effort" = silently skip if Landlock unavailable
+#                            "enforce" = fail if unavailable
